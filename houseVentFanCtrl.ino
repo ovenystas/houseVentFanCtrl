@@ -19,13 +19,35 @@
 
 
 #define NUMBER_OF_RELAYS 6
-#define EEPROM_ADDRESS 0x0000
+#define EEPROM_ADDRESS 0
+#define CHECKSUM_ADDRESS EEPROM_ADDRESS + 1
 
-#define TEMP_HYSTERESIS 10  // In 10th of degC
-#define HUM_HYSTERESIS 10  // In 10th of %
-#define READ_INTERVAL_MS 30000  // Read every 30 seconds
+#define TEMP_HYSTERESIS_DEFAULT 10      // In 10th of degC
+#define HUM_HYSTERESIS_DEFAULT 10       // In 10th of %
+#define READ_INTERVAL_DEFAULT_MS 30000  // Read every 30 seconds
+
+#define PARAMETER_START_EEPROM_ADDRESS 0x2000
+#define PARAMETER_MAX_NUMBER_OF 32
+#define PARAMETER_FIRST_NUMBER 64
 
 
+typedef enum
+{
+  CH_FAN = 1,
+  CH_TEMP,
+  CH_HUM,
+} channelType_t;
+
+typedef enum
+{
+  PARAM_TEMP_HYSTERESIS = 0,
+  PARAM_HUM_HYSTERESIS,
+  PARAM_READ_INTERVAL,
+  PARAM_MAX,
+} param_t;
+
+
+// Constants
 // Pin numbers, where the six relays are connected (avoiding standard LED pin)
 const uint8_t RELAY_PIN[NUMBER_OF_RELAYS] = {9, 10, 11, 12, 14, 15 };
 
@@ -41,14 +63,29 @@ const uint8_t relayTable[6][5] =
   { HIGH, HIGH, LOW,  LOW,  LOW  },  // Full speed
 };
 
+const uint16_t parametersDefault[PARAM_MAX] =
+{
+  TEMP_HYSTERESIS_DEFAULT,
+  HUM_HYSTERESIS_DEFAULT,
+  READ_INTERVAL_DEFAULT_MS,
+};
+
+
+// Variables
 DHT dht22(16, DHT22);
 int16_t temperature = 0;      // In 10th of Celsius.
 int16_t sentTemperature = 0;  // In 10th of Celsius.
 int16_t humidity = 0;         // In 10th of percent.
 int16_t sentHumidity = 0;     // In 10th of percent.
 
+// Variables for parameters.
+uint16_t parameters[PARAM_MAX] = {0};
 
+
+// Z-Uno setup macros.
 ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
+
+ZUNO_SETUP_CFGPARAMETER_HANDLER(configParameterChanged);
 
 // Setup the Z-Wave channel for Z-Uno.
 ZUNO_SETUP_CHANNELS(
@@ -72,12 +109,6 @@ ZUNO_SETUP_CHANNELS(
   )
 );
 
-typedef enum
-{
-  CH_FAN = 1,
-  CH_TEMP,
-  CH_HUM
-} channel_type_t;
 
 void setup(void)
 {
@@ -92,6 +123,17 @@ void setup(void)
   setterFan(EEPROM.read(EEPROM_ADDRESS));
 
   dht22.begin();
+
+  if (verifyChecksum())
+  {
+    loadParameters();
+  }
+  else
+  {
+    setDefaultParameters();
+    saveParameters();
+    updateChecksum();
+  }
 }
 
 
@@ -101,25 +143,75 @@ void loop(void)
   static uint32_t lastMillis = 0;
   
   uint32_t currentMillis = millis();
-  if (currentMillis - lastMillis >= READ_INTERVAL_MS)
+  if (currentMillis - lastMillis >= parameters[PARAM_READ_INTERVAL])
   {
     lastMillis = currentMillis;
      
     temperature = dht22.readTemperatureC10();
     humidity = dht22.readHumidityH10();
 
-    if (abs(temperature - sentTemperature) >= TEMP_HYSTERESIS)  // >= 1.0 degC diff
+    if (abs(temperature - sentTemperature) >= parameters[PARAM_TEMP_HYSTERESIS])
     {
       zunoSendReport(CH_TEMP);
       sentTemperature = temperature;
     }
 
-    if (abs(humidity - sentHumidity) >= HUM_HYSTERESIS)  // >= 1.0 % diff
+    if (abs(humidity - sentHumidity) >= parameters[PARAM_HUM_HYSTERESIS])
     {
       zunoSendReport(CH_HUM);
       sentHumidity = humidity;
     }
   }
+}
+
+
+void setDefaultParameters()
+{
+  memcpy(parameters, parametersDefault, sizeof(parameters));
+}
+
+  
+void loadParameters()
+{
+  for (int8_t i = 0; i < PARAM_MAX; i++)
+  {
+    zunoLoadCFGParam(PARAMETER_FIRST_NUMBER + i, &parameters[i]);
+  }
+}
+
+
+void saveParameters()
+{
+  for (int8_t i = 0; i < PARAM_MAX; i++)
+  {
+    zunoSaveCFGParam(PARAMETER_FIRST_NUMBER + i, &parameters[i]);
+  }
+}
+
+
+void updateChecksum(void)
+{
+  uint8_t checksum = 0;
+  for (int8_t i = 0; i < PARAM_MAX; i++)
+  {
+    checksum += highByte(parameters[i]);
+    checksum += lowByte(parameters[i]);
+  }
+
+  EEPROM.update(CHECKSUM_ADDRESS, checksum);
+}
+
+
+// Returns true if checksum is OK
+bool verifyChecksum()
+{
+  uint8_t checksum = 0;
+  for (int8_t i = 0; i < (PARAM_MAX * 2); i++)
+  {
+    checksum += EEPROM.read(PARAMETER_START_EEPROM_ADDRESS + i);
+  }
+
+  return (checksum == EEPROM.read(CHECKSUM_ADDRESS));
 }
 
 
@@ -181,4 +273,18 @@ uint16_t getterTemperature()
 uint16_t getterHumidity()
 {
   return humidity;
+}
+
+
+void configParameterChanged(uint8_t param, uint16_t* value)
+{
+  uint8_t paramNumber = param - PARAMETER_FIRST_NUMBER;
+  if (paramNumber >= PARAM_MAX)
+  {
+    return;
+  }
+
+  parameters[paramNumber] = *value;
+
+  updateChecksum();
 }
